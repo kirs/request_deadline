@@ -33,22 +33,17 @@ module RequestDeadline
       verify_deadline_configuration_once
 
       if has_deadline? && query_supports_deadline?(sql)
-        left = request_time_left
-
-        if left <= 0
+        if request_time_left <= 0
           raise ActiveRecord::DeadlineExceeded.new(sql)
         end
-
-        hint = "/*+ MAX_EXECUTION_TIME(#{(left * ROOM * 1000).round}) */"
-        sql = sql.sub(/\ASELECT/, "SELECT #{hint}")
       end
-      super(sql, name)
+      super
     end
 
     private
 
     def query_supports_deadline?(sql)
-      sql =~ /\ASELECT/ && !(sql =~ /MAX_EXECUTION_TIME/)
+      sql =~ /\ASELECT/
     end
 
     def verify_deadline_configuration_once
@@ -93,8 +88,27 @@ module RequestDeadline
     end
   end
 
+  module RelationExtension
+    def optimizer_hints_values
+      values = super
+      if has_deadline? && !values.find { |v| v =~ /MAX_EXECUTION_TIME/ }
+        left = RequestStore.store[:deadline] - Concurrent.monotonic_time
+        values = values + ["MAX_EXECUTION_TIME(#{(left * 1000).round})"]
+      end
+      values
+    end
+
+    private
+
+    def has_deadline?
+      !Thread.current[:skip_request_deadline] && RequestStore.store[:deadline]
+    end
+  end
+
   def self.insert_active_record
     ActiveRecord::ConnectionAdapters::Mysql2Adapter.prepend(RequestDeadline::ActiveRecordExtension)
+
+    ActiveRecord::Relation.prepend(RelationExtension)
   end
 
   class Railtie < Rails::Railtie
